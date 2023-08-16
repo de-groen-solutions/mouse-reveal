@@ -2,6 +2,7 @@ use std::fmt::{ Formatter, Debug };
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub capture_seconds: f64,
     pub window_size: i32,
     pub device_name: String,
     pub decay: f64,
@@ -14,6 +15,7 @@ pub struct Config {
 impl Config {
     pub fn new() -> Config {
         Config {
+            capture_seconds: 5.0,
             window_size: 200,
             decay: 0.98,
             accel: 1500.0f64,
@@ -59,6 +61,10 @@ impl VelocityEvent {
 
     pub fn velocity(&self) -> f64 {
         self.velocity
+    }
+
+    pub fn time(&self) -> std::time::Instant {
+        self.time
     }
 
     pub fn expired(&self) -> bool {

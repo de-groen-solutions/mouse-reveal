@@ -1,11 +1,14 @@
 use std::fmt::Debug;
 use std::sync::RwLock;
+use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
 use animations::Animation;
+use models::Config;
 
 mod models;
 mod animations;
+mod logging;
 
 pub struct PipeContext<Context, V>(Context, V);
 
@@ -304,12 +307,86 @@ fn main() -> ! {
     let last_velocity_event = std::sync::Arc::new(RwLock::new(models::VelocityEvent::new(0.0)));
 
     let config = models::Config::new();
-    start_motion_thread(config.clone(), std::sync::Arc::clone(&last_velocity_event));
-    start_ui_loop(config, last_velocity_event);
+    let (tx, rx) = std::sync::mpsc::channel();
+    start_capture_thread(config.clone(), rx);
+    start_motion_thread(
+        config.clone(),
+        logging::CaptureEmitter::new(
+            std::time::Instant::now(),
+            std::time::Duration::from_secs_f64(config.capture_seconds),
+            tx.clone()
+        ),
+        std::sync::Arc::clone(&last_velocity_event)
+    );
+    start_ui_loop(
+        config.clone(),
+        logging::CaptureEmitter::new(
+            std::time::Instant::now(),
+            std::time::Duration::from_secs_f64(config.capture_seconds),
+            tx
+        ),
+        last_velocity_event
+    );
+}
+
+fn start_capture_thread(config: Config, receiver: std::sync::mpsc::Receiver<logging::LogEvent>) {
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let mut capture = logging::Capture::new();
+        loop {
+            if start.elapsed() > Duration::from_secs(config.capture_seconds as _) {
+                println!("Capture finished!");
+                break;
+            }
+
+            match receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => {
+                    capture.push(event);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    println!("Receiver disconnected");
+                    break;
+                }
+            }
+        }
+
+        capture
+            .events()
+            .iter()
+            .for_each(|x| {
+                match x {
+                    logging::LogEvent::PointerInput { x, y, time } => {
+                        println!(
+                            "{:1.6}s PointerInputEvent, x: {}, y: {}",
+                            (*time - start).as_secs_f64(),
+                            x,
+                            y
+                        );
+                    }
+                    logging::LogEvent::Velocity { velocity, time } => {
+                        println!(
+                            "{:1.6}s VelocityEvent, velocity: {:1.1}",
+                            (*time - start).as_secs_f64(),
+                            velocity
+                        );
+                    }
+                    logging::LogEvent::Evdev { time, evdev_event } => {
+                        println!(
+                            "{:1.6}s EvdevEvent, evdev_event: {:?}, value: {}",
+                            (*time - start).as_secs_f64(),
+                            evdev_event.kind(),
+                            evdev_event.value()
+                        );
+                    }
+                }
+            });
+    });
 }
 
 fn start_ui_loop(
     config: models::Config,
+    capture: logging::CaptureEmitter,
     last_velocity_event: std::sync::Arc<RwLock<models::VelocityEvent>>
 ) -> ! {
     let (conn, screen_num) = xcb::Connection::connect(None).unwrap();
@@ -374,6 +451,7 @@ fn update_avg(config: models::Config, avg: f64, velocity: f64) -> f64 {
 
 fn start_motion_thread(
     config: models::Config,
+    capture: logging::CaptureEmitter,
     last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>
 ) {
     std::thread::spawn(move || {
@@ -382,6 +460,7 @@ fn start_motion_thread(
 
             MotionMonitor::new(
                 config.device_name.clone(),
+                capture.clone(),
                 std::sync::Arc::clone(&last_speed)
             ).start_until_error();
         }
@@ -390,6 +469,7 @@ fn start_motion_thread(
 
 struct MotionMonitor {
     device_name: String,
+    capture: logging::CaptureEmitter,
     last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>,
     last: models::PointerInputEvent,
     working: models::PointerInputEvent,
@@ -411,10 +491,12 @@ impl Debug for MotionMonitor {
 impl MotionMonitor {
     pub fn new(
         device_name: String,
+        capture: logging::CaptureEmitter,
         last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>
     ) -> MotionMonitor {
         MotionMonitor {
             device_name,
+            capture,
             last_speed,
             last: models::PointerInputEvent {
                 x: 0,
@@ -474,6 +556,10 @@ impl MotionMonitor {
     }
 
     fn handle_event(&mut self, input_event: evdev::InputEvent) {
+        self.capture.emit(logging::LogEvent::Evdev {
+            time: std::time::Instant::now(),
+            evdev_event: input_event,
+        });
         match (input_event.event_type(), input_event.kind(), input_event.value()) {
             (
                 evdev::EventType::ABSOLUTE,
@@ -504,6 +590,7 @@ impl MotionMonitor {
             }
             (evdev::EventType::SYNCHRONIZATION, _, _) => {
                 if self.ignore_block {
+                    self.ignore_block = false;
                     return;
                 }
                 self.working.time = std::time::Instant::now();
@@ -516,7 +603,13 @@ impl MotionMonitor {
                     return;
                 }
 
-                *self.last_speed.write().unwrap() = models::VelocityEvent::new(velocity);
+                let velocity_event = models::VelocityEvent::new(velocity);
+                self.capture.emit(logging::LogEvent::Velocity {
+                    velocity: velocity_event.velocity(),
+                    time: velocity_event.time(),
+                });
+
+                *self.last_speed.write().unwrap() = velocity_event;
             }
             _ => {
                 // Other events are ignored
