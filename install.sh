@@ -14,6 +14,7 @@ function resize_icons() {
     # For each size, create a new resized icon
     for SIZE in "${SIZES[@]}"
     do
+        [ -f icons/${SIZE}x${SIZE}/dgs-mouse-reveal.png ] && continue
         mkdir -p icons/${SIZE}x${SIZE}
         convert $ORIGINAL_ICON_PATH -resize ${SIZE}x${SIZE} icons/${SIZE}x${SIZE}/dgs-mouse-reveal.png
     done

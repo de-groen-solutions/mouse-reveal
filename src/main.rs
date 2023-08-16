@@ -1,66 +1,83 @@
+use std::fmt::Debug;
 use std::sync::RwLock;
 use std::thread;
 use std::time::Duration;
-use serde::{ Deserialize, Serialize };
-mod animations;
 use animations::Animation;
 
-#[derive(Serialize, Deserialize)]
-enum Kind {
-    Grow,
-    GrowOutline,
-    Shrink,
-    ShrinkOutline,
+mod models;
+mod animations;
+
+pub struct PipeContext<Context, V>(Context, V);
+
+impl<Context, Value> PipeContext<Context, Value> where Context: Sized + Copy {
+    pub fn out(self) -> Value {
+        self.1
+    }
+
+    pub fn map<F, R>(self, f: F) -> PipeContext<Context, R> where F: FnOnce(Value) -> R {
+        PipeContext(self.0, f(self.1))
+    }
+
+    pub fn map_out<F, R>(self, f: F) -> R where F: FnOnce(Value) -> R {
+        f(self.1)
+    }
+
+    pub fn to<F, R>(self, f: F) -> PipeContext<Context, R> where F: FnOnce(Context, Value) -> R {
+        PipeContext(self.0, f(self.0, self.1))
+    }
+
+    pub fn final_to<F, R>(self, f: F) -> R where F: FnOnce(Context, Value) -> R {
+        f(self.0, self.1)
+    }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct IndicatorConfig {
-    max_size: u16, // display pixels
-    duration: u64, // milliseconds
-    thickness: u32, // display pixels
-    framerate: u16, // number of circles to display
-    color: u32, // color in hex, eg.: 0x00FECA
-    animation: Kind, // 'Grow' | 'Shrink' | 'GrowOutline' | 'ShrinkOutline'
+trait PipeFactory<T> {
+    fn pipe_in<V>(&self, v: V) -> PipeContext<&Self, V>;
 }
 
-// sane defaults
-impl std::default::Default for IndicatorConfig {
-    fn default() -> IndicatorConfig {
-        IndicatorConfig {
-            max_size: 300u16,
-            duration: 500u64,
-            thickness: 1,
-            framerate: 30,
-            color: 0xffffff,
-            animation: Kind::Grow,
-        }
+impl<T> PipeFactory<T> for T {
+    fn pipe_in<V>(&self, v: V) -> PipeContext<&Self, V> {
+        PipeContext(self, v)
     }
 }
 
 struct OverlayWindow {
     conn: xcb::Connection,
-    screen_num: usize,
     win: xcb::x::Window,
     gfx: xcb::x::Gcontext,
     size: u32,
+    visible: bool,
+    position: models::Position32,
+}
+
+impl Debug for OverlayWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OverlayWindow")
+            .field("size", &self.size)
+            .field("visible", &self.visible)
+            .field("position", &self.position)
+            .finish()
+    }
 }
 
 impl OverlayWindow {
-    pub fn new(conn: xcb::Connection, screen_num: usize) -> OverlayWindow {
-        let win = OverlayWindow::create_window(&conn, screen_num);
+    pub fn new(config: models::Config, conn: xcb::Connection, screen_num: usize) -> OverlayWindow {
+        let win = OverlayWindow::create_window(&conn, screen_num, config.window_size as _);
         let gfx = conn.create_gcontext(win);
+
         OverlayWindow {
             conn,
-            screen_num,
             win,
             gfx,
-            size: 300,
+            size: config.window_size as _,
+            position: models::Position32::new(0, 0),
+            visible: false,
         }
     }
 
-    fn create_window(conn: &xcb::Connection, screen_num: usize) -> xcb::x::Window {
-        let window_state = conn.atom_(b"ATOM_WM_STATE");
-        let window_on_top = conn.atom_(b"ATOM_WM_STATE_STAYS_ON_TOP");
+    fn create_window(conn: &xcb::Connection, screen_num: usize, size: u32) -> xcb::x::Window {
+        let window_state = conn.get_atom(b"ATOM_WM_STATE");
+        let window_on_top = conn.get_atom(b"ATOM_WM_STATE_STAYS_ON_TOP");
 
         let screen = conn.get_setup().roots().nth(screen_num).unwrap();
         let alpha = screen.alpha_visual().unwrap();
@@ -74,15 +91,15 @@ impl OverlayWindow {
                 parent: screen.root(),
                 x: 0,
                 y: 0,
-                width: 500,
-                height: 500,
+                width: size as u16,
+                height: size as u16,
                 border_width: 0,
                 class: xcb::x::WindowClass::InputOutput,
                 visual: alpha.visual_id(),
                 value_list: &[
                     xcb::x::Cw::BackPixel(0x00),
-                    xcb::x::Cw::BorderPixel(0x00), // you need this if you use alpha apparently
-                    xcb::x::Cw::OverrideRedirect(true), // dont take focus
+                    xcb::x::Cw::BorderPixel(0x00),
+                    xcb::x::Cw::OverrideRedirect(true),
                     xcb::x::Cw::EventMask(xcb::x::EventMask::EXPOSURE),
                     xcb::x::Cw::Colormap(colormap),
                 ],
@@ -101,7 +118,7 @@ impl OverlayWindow {
                 window: win,
                 property: xcb::x::ATOM_WM_NAME,
                 r#type: xcb::x::ATOM_STRING,
-                data: "hello".as_bytes(),
+                data: "dgsmousereveal".as_bytes(),
             })
         );
 
@@ -115,6 +132,8 @@ impl OverlayWindow {
             })
         );
 
+        // Prevent interaction from the mouse with the window,
+        // OverrideRedirect did not work, so applying a clip mask instead does the trick.
         conn.send_request(
             &(xcb::shape::Rectangles {
                 operation: xcb::shape::So::Set,
@@ -137,23 +156,35 @@ impl OverlayWindow {
         win
     }
 
-    pub fn move_win_to_cursor(&self, p_x: i32, p_y: i32) {
-        let win_x = p_x - (self.size as i32) / 2;
-        let win_y = p_y - (self.size as i32) / 2;
+    pub fn set_center_position(&mut self, pos: models::Position32) {
+        let pos = models::Position32::new(
+            pos.x - (self.size as i32) / 2,
+            pos.y - (self.size as i32) / 2
+        );
+
+        if self.position == pos {
+            return;
+        }
 
         self.conn.send_request(
             &(xcb::x::ConfigureWindow {
                 window: self.win,
-                value_list: &[xcb::x::ConfigWindow::X(win_x), xcb::x::ConfigWindow::Y(win_y)],
+                value_list: &[
+                    xcb::x::ConfigWindow::X(pos.x as _),
+                    xcb::x::ConfigWindow::Y(pos.y as _),
+                ],
             })
         );
+
+        self.position = pos;
     }
 
     pub fn get_win(&self) -> xcb::x::Window {
         self.win
     }
 
-    fn show(&self) {
+    fn show(&mut self) {
+        self.visible = true;
         self.conn.send_request(
             &(xcb::x::MapWindow {
                 window: self.win,
@@ -161,7 +192,8 @@ impl OverlayWindow {
         );
     }
 
-    fn hide(&self) {
+    fn hide(&mut self) {
+        self.visible = false;
         self.conn.send_request(
             &(xcb::x::UnmapWindow {
                 window: self.win,
@@ -174,12 +206,13 @@ impl OverlayWindow {
     }
 
     fn handle_event(&self) {
-        let poll_for_queued_event = self.conn.poll_for_queued_event();
-        match poll_for_queued_event {
+        match self.conn.poll_for_queued_event() {
             Ok(Some(xcb::Event::X(xcb::x::Event::Expose(_)))) => {}
             Ok(Some(x)) => println!("event: {:?}", x),
-            Ok(None) => {}
             Err(e) => println!("error: {}", e),
+            Ok(None) => {
+                // No event
+            }
         }
     }
 
@@ -211,9 +244,9 @@ trait ConnExt {
         screen: &xcb::x::Screen,
         visual: &xcb::x::Visualtype
     ) -> xcb::x::Colormap;
-    fn get_pointer(&self, win: xcb::x::Window) -> (i16, i16);
-    fn atom_(&self, name: &[u8]) -> xcb::x::Atom;
     fn create_gcontext(&self, win: xcb::x::Window) -> xcb::x::Gcontext;
+    fn get_pointer(&self, win: xcb::x::Window) -> models::Position32;
+    fn get_atom(&self, name: &[u8]) -> xcb::x::Atom;
 }
 
 impl ConnExt for xcb::Connection {
@@ -234,233 +267,260 @@ impl ConnExt for xcb::Connection {
         colormap
     }
 
-    fn get_pointer(&self, win: xcb::x::Window) -> (i16, i16) {
-        let x = self
-            .wait_for_reply(
-                self.send_request(
-                    &(xcb::x::QueryPointer {
-                        window: win,
-                    })
-                )
-            )
-            .unwrap();
-
-        (x.root_x(), x.root_y())
-    }
-
-    fn atom_(&self, name: &[u8]) -> xcb::x::Atom {
-        self.wait_for_reply(
-            self.send_request(
-                &(xcb::x::InternAtom {
-                    only_if_exists: false,
-                    name,
-                })
-            )
-        )
-            .unwrap()
-            .atom()
-    }
-
     fn create_gcontext(&self, win: xcb::x::Window) -> xcb::x::Gcontext {
         let gfx_ctx = self.generate_id();
-        self.send_request(
-            &(xcb::x::CreateGc {
-                cid: gfx_ctx,
-                drawable: xcb::x::Drawable::Window(win),
-                value_list: &[
-                    xcb::x::Gc::Foreground(0x00c00000),
-                    xcb::x::Gc::LineWidth(10),
-                    xcb::x::Gc::GraphicsExposures(false),
-                ],
-            })
-        );
+        let create_gc = xcb::x::CreateGc {
+            cid: gfx_ctx,
+            drawable: xcb::x::Drawable::Window(win),
+            value_list: &(
+                [
+                    // xcb::x::Gc::GraphicsExposures(false),
+                ]
+            ),
+        };
+        self.send_request(&create_gc);
         gfx_ctx
     }
-}
 
-#[derive(Debug, Clone, Copy)]
-struct MouseUJpdate {
-    velocity: f64,
-    time: std::time::Instant,
-}
+    fn get_pointer(&self, win: xcb::x::Window) -> models::Position32 {
+        self.pipe_in(&(xcb::x::QueryPointer { window: win }))
+            .to(Self::send_request)
+            .to(Self::wait_for_reply)
+            .map(Result::unwrap)
+            .map_out(|r| models::Position32::new(r.root_x() as i32, r.root_y() as i32))
+    }
 
-impl MouseUJpdate {
-    pub fn new(velocity: f64) -> MouseUJpdate {
-        MouseUJpdate {
-            velocity,
-            time: std::time::Instant::now(),
-        }
+    fn get_atom(&self, name: &[u8]) -> xcb::x::Atom {
+        let atom = xcb::x::InternAtom {
+            only_if_exists: false,
+            name,
+        };
+
+        self.pipe_in(&atom).to(Self::send_request).final_to(Self::wait_for_reply).unwrap().atom()
     }
 }
 
 fn main() -> ! {
+    let last_velocity_event = std::sync::Arc::new(RwLock::new(models::VelocityEvent::new(0.0)));
+
+    let config = models::Config::new();
+    start_motion_thread(config.clone(), std::sync::Arc::clone(&last_velocity_event));
+    start_ui_loop(config, last_velocity_event);
+}
+
+fn start_ui_loop(
+    config: models::Config,
+    last_velocity_event: std::sync::Arc<RwLock<models::VelocityEvent>>
+) -> ! {
     let (conn, screen_num) = xcb::Connection::connect(None).unwrap();
-    let win = OverlayWindow::new(conn, screen_num as _);
-    let animation = Animation::circles(win.size);
+    let mut win = OverlayWindow::new(config.clone(), conn, screen_num as _);
+    let animation = Animation::new(win.size);
 
-    let last_speed = std::sync::Arc::new(RwLock::new(MouseUJpdate::new(0.0)));
+    let mut avg_weighted = 0.0;
+    let mut avg_ui = 0.0;
 
-    start_motion_thread(std::sync::Arc::clone(&last_speed));
+    let mut last_render = std::time::Instant::now();
+    let mut last_debug = std::time::Instant::now();
 
-    let mut shown = true;
-    let mut avg = 0.0;
-    let mut thresh = 0.0;
-    let mut thresh2 = 3000.0;
-    let mut last_print = std::time::Instant::now();
+    let fps_hidden = Duration::from_millis(1000 / 20);
+    let fps_visible = Duration::from_millis(1000 / 120);
+    let fps_animation = Duration::from_millis(1000 / 30);
+
     loop {
         win.handle_event();
-        let mouse_ujpdate = *last_speed.read().unwrap();
-        // println!("speed: {}, elapsed: {:?}", mouse_ujpdate.velocity, mouse_ujpdate.time.elapsed());
-        let lasts = if mouse_ujpdate.time.elapsed() > Duration::from_millis(1000) {
-            0.0
-        } else {
-            mouse_ujpdate.velocity
-        };
 
-        let weight = (avg / 4000.0f64).max(0.02).min(0.08);
-        let rweight = 1.0 - weight;
-        avg = avg * rweight * 0.999 + lasts * weight;
-        // avg = if lasts < 200.0 { avg * 0.9 + lasts * 0.1 } else if avg < lasts && lasts > 1000.0 { avg * 0.8 + lasts * 0.2 } else { avg * 0.99 + lasts * 0.01 };
+        let velocity_event = *last_velocity_event.read().unwrap();
+        let velocity = if velocity_event.expired() { 0.0 } else { velocity_event.velocity() };
 
-        if avg > thresh || mouse_ujpdate.velocity > thresh2 {
-            thresh = 100.0;
-            if !shown {
-                println!(
-                    "avg: {:6.1}, thresh: {:6.1}, velocity: {:6.1}, weight: {:6.1}, rweight: {:6.1}",
-                    avg,
-                    thresh,
-                    mouse_ujpdate.velocity,
-                    weight,
-                    rweight
-                );
-                shown = true;
-                win.show();
+        avg_weighted = update_avg(config.clone(), avg_weighted, velocity);
+
+        if avg_ui > 50.0 || avg_weighted > config.threshold {
+            avg_ui = avg_ui * 0.95 + avg_weighted * 0.05;
+
+            if last_render.elapsed() > fps_animation {
+                last_render = std::time::Instant::now();
+                animation.play(win.get_conn(), win.get_win(), win.get_gfx(), avg_ui);
             }
-            animation.play(win.get_conn(), win.get_win(), win.get_gfx(), avg - thresh);
-            let (p_x, p_y) = win.get_conn().get_pointer(win.get_win());
-            win.move_win_to_cursor(p_x as _, p_y as _);
-            thread::sleep(Duration::from_millis(1000 / 90));
-        } else if shown {
-            thresh = 1800.0;
-            shown = false;
-            win.hide();
-            thread::sleep(Duration::from_millis(1000 / 10));
+
+            win.show();
+            win.set_center_position(win.get_conn().get_pointer(win.get_win()));
+            win.conn.flush().unwrap();
+
+            thread::sleep(fps_visible);
+        } else {
+            avg_ui = 0.0;
+
+            if win.visible {
+                win.hide();
+                win.conn.flush().unwrap();
+            }
+
+            thread::sleep(fps_hidden);
         }
 
-        win.conn.flush().unwrap();
-
-        // if last_print.elapsed() > Duration::from_millis(200) {
-        //     last_print = std::time::Instant::now();
-        //     println!(
-        //         "avg: {:6.1}, thresh: {:6.1}, velocity: {:6.1}, weight: {:6.1}, rweight: {:6.1}",
-        //         avg,
-        //         thresh,
-        //         mouse_ujpdate.velocity,
-        //         weight,
-        //         rweight
-        //     );
-        // }
+        if last_debug.elapsed() > Duration::from_secs(1) {
+            last_debug = std::time::Instant::now();
+            println!("{:?}", win);
+        }
     }
 }
 
-fn start_motion_thread(last_speed: std::sync::Arc<RwLock<MouseUJpdate>>) {
-    std::thread::spawn({
-        move || {
-            let mut enumerate = evdev::enumerate();
-            let find = enumerate.find(|(_, device)| device.name().unwrap_or("").contains("Apple"));
-            let (_path, mut device) = find.unwrap();
-            let mut last_x = 0;
-            let mut last_y = 0;
-            let mut last = PointerInputEvent {
-                x: 0,
-                y: 0,
-                time: std::time::Instant::now(),
-            };
-            loop {
-                let events = device.fetch_events().unwrap();
-                let mut ignore = false;
-                for e in events {
-                    match (e.event_type(), e.kind(), e.value()) {
-                        (
-                            evdev::EventType::ABSOLUTE,
-                            evdev::InputEventKind::AbsAxis(evdev::AbsoluteAxisType::ABS_MT_SLOT),
-                            _num,
-                        ) => {
-                            ignore = true;
-                        }
-                        (
-                            evdev::EventType::ABSOLUTE,
-                            evdev::InputEventKind::AbsAxis(
-                                evdev::AbsoluteAxisType::ABS_MT_POSITION_X,
-                            ),
-                            val,
-                        ) => {
-                            if ignore {
-                                continue;
-                            }
-                            last_x = val;
-                        }
-                        (
-                            evdev::EventType::ABSOLUTE,
-                            evdev::InputEventKind::AbsAxis(evdev::AbsoluteAxisType::ABS_X),
-                            val,
-                        ) => {
-                            if ignore {
-                                continue;
-                            }
-                            last_x = val;
-                        }
-                        (
-                            evdev::EventType::ABSOLUTE,
-                            evdev::InputEventKind::AbsAxis(evdev::AbsoluteAxisType::ABS_Y),
-                            val,
-                        ) => {
-                            if ignore {
-                                continue;
-                            }
-                            last_y = val;
-                        }
-                        (evdev::EventType::SYNCHRONIZATION, _, _) => {
-                            if ignore {
-                                continue;
-                            }
-                            let cur = PointerInputEvent {
-                                x: last_x,
-                                y: last_y,
-                                time: std::time::Instant::now(),
-                            };
-                            let m = cur.velocity(&last);
-                            last = cur;
+fn update_avg(config: models::Config, avg: f64, velocity: f64) -> f64 {
+    let weight_input = (velocity / config.accel).max(config.accel_decay).min(config.accel_inc);
+    let weight_state = 1.0 - weight_input;
 
-                            if m > 5000.0 {
-                                continue;
-                            }
-                            let mouse_ujpdate = MouseUJpdate::new(m);
+    avg * weight_state * config.decay + velocity * weight_input
+}
 
-                            *last_speed.write().unwrap() = mouse_ujpdate;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+fn start_motion_thread(
+    config: models::Config,
+    last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>
+) {
+    std::thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+
+            MotionMonitor::new(
+                config.device_name.clone(),
+                std::sync::Arc::clone(&last_speed)
+            ).start_until_error();
         }
     });
 }
 
-struct PointerInputEvent {
-    x: i32,
-    y: i32,
-    time: std::time::Instant,
+struct MotionMonitor {
+    device_name: String,
+    last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>,
+    last: models::PointerInputEvent,
+    working: models::PointerInputEvent,
+    ignore_block: bool,
 }
 
-impl PointerInputEvent {
-    pub fn velocity(&self, previous: &PointerInputEvent) -> f64 {
-        let delta = self.time - previous.time;
-        let x = self.x - previous.x;
-        let y = self.y - previous.y;
-        let delta = delta.as_secs_f64();
-        let x = (x as f64) / delta;
-        let y = (y as f64) / delta;
-        (x * y).abs().sqrt()
+impl Debug for MotionMonitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MotionMonitor")
+            .field("device_name", &self.device_name)
+            .field("last_speed", &self.last_speed)
+            .field("last", &self.last)
+            .field("working", &self.working)
+            .field("ignore_block", &self.ignore_block)
+            .finish()
+    }
+}
+
+impl MotionMonitor {
+    pub fn new(
+        device_name: String,
+        last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>
+    ) -> MotionMonitor {
+        MotionMonitor {
+            device_name,
+            last_speed,
+            last: models::PointerInputEvent {
+                x: 0,
+                y: 0,
+                time: std::time::Instant::now(),
+            },
+            working: models::PointerInputEvent {
+                x: 0,
+                y: 0,
+                time: std::time::Instant::now(),
+            },
+            ignore_block: false,
+        }
+    }
+
+    fn get_device(&self) -> Option<evdev::Device> {
+        evdev
+            ::enumerate()
+            .find(|(_, device)| {
+                device.name().unwrap_or_default().contains(self.device_name.as_str())
+            })
+            .map(|(_, device)| device)
+    }
+
+    pub fn start_until_error(&mut self) {
+        let device = match self.get_device() {
+            Some(device) => device,
+            None => {
+                println!("No device found!");
+                return;
+            }
+        };
+
+        println!("Device found: {}", device.name().unwrap_or("(unknown)"));
+
+        let result = self.listen_event_loop(device);
+        if let Err(e) = result {
+            println!("Error while monitoring: {}", e);
+        }
+
+        println!("Device disconnected!");
+    }
+
+    fn listen_event_loop(&mut self, mut device: evdev::Device) -> Result<(), evdev::Error> {
+        println!("Starts monitoring device: {}", device.name().unwrap_or("(unknown)"));
+
+        let mut last_debug = std::time::Instant::now();
+        loop {
+            self.ignore_block = false;
+            device.fetch_events()?.for_each(|e| self.handle_event(e));
+
+            if last_debug.elapsed() > Duration::from_secs(1) {
+                last_debug = std::time::Instant::now();
+                println!("{:?}", self);
+            }
+        }
+    }
+
+    fn handle_event(&mut self, input_event: evdev::InputEvent) {
+        match (input_event.event_type(), input_event.kind(), input_event.value()) {
+            (
+                evdev::EventType::ABSOLUTE,
+                evdev::InputEventKind::AbsAxis(evdev::AbsoluteAxisType::ABS_MT_SLOT),
+                _num,
+            ) => {
+                self.ignore_block = true;
+            }
+            (
+                evdev::EventType::ABSOLUTE,
+                evdev::InputEventKind::AbsAxis(evdev::AbsoluteAxisType::ABS_X),
+                val,
+            ) => {
+                if self.ignore_block {
+                    return;
+                }
+                self.working.x = val;
+            }
+            (
+                evdev::EventType::ABSOLUTE,
+                evdev::InputEventKind::AbsAxis(evdev::AbsoluteAxisType::ABS_Y),
+                val,
+            ) => {
+                if self.ignore_block {
+                    return;
+                }
+                self.working.y = val;
+            }
+            (evdev::EventType::SYNCHRONIZATION, _, _) => {
+                if self.ignore_block {
+                    return;
+                }
+                self.working.time = std::time::Instant::now();
+
+                let velocity = self.working.velocity(&self.last);
+                self.last = self.working;
+
+                if velocity > 5000.0 {
+                    // Ignore extreme values
+                    return;
+                }
+
+                *self.last_speed.write().unwrap() = models::VelocityEvent::new(velocity);
+            }
+            _ => {
+                // Other events are ignored
+            }
+        }
     }
 }
