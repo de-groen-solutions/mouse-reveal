@@ -1,0 +1,52 @@
+name: Build and Package
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Build Rust binary
+        run: cargo build --release --all-features --target x86_64-unknown-linux-gnu
+
+      - name: Upload Rust binary
+        uses: actions/upload-artifact@v2
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: target/x86_64-unknown-linux-gnu/release/dgs-mouse-reveal
+
+      # - name: Install cargo-deb and cargo-rpm
+      #   run: |
+      #     cargo install cargo-deb
+      #     cargo install cargo-rpm
+
+      # - name: Create Debian package
+      #   run: cargo deb
+
+      # - name: Create RPM package
+      #   run: cargo rpm build
+
+      # - name: Upload Debian package
+      #   uses: actions/upload-artifact@v2
+      #   with:
+      #     name: debian-package
+      #     path: target/debian/*.deb
+
+      # - name: Upload RPM package
+      #   uses: actions/upload-artifact@v2
+      #   with:
+      #     name: rpm-package
+      #     path: target/rpm/RPMS/*/*.rpm

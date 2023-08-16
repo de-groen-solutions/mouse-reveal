@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Exec=/usr/local/bin/dgs-mouse-reveal
+X-GNOME-Autostart-enabled=true
+Name=dGS Mouse Reveal
+Icon=dgs-mouse-reveal
