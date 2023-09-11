@@ -1,9 +1,4 @@
 pub enum LogEvent {
-    PointerInput {
-        x: i32,
-        y: i32,
-        time: std::time::Instant,
-    },
     Velocity {
         velocity: f64,
         time: std::time::Instant,
@@ -11,6 +6,11 @@ pub enum LogEvent {
     Evdev {
         time: std::time::Instant,
         evdev_event: evdev::InputEvent,
+    },
+    PointerInput {
+        time: std::time::Instant,
+        x: i32,
+        y: i32,
     },
 }
 
@@ -43,7 +43,7 @@ impl CaptureEmitter {
     pub fn new(
         start: std::time::Instant,
         expires: std::time::Duration,
-        emitter: std::sync::mpsc::Sender<LogEvent>
+        emitter: std::sync::mpsc::Sender<LogEvent>,
     ) -> CaptureEmitter {
         CaptureEmitter {
             start,

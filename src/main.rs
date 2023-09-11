@@ -1,46 +1,73 @@
-use std::fmt::Debug;
-use std::sync::RwLock;
-use std::sync::mpsc::RecvTimeoutError;
-use std::thread;
-use std::time::Duration;
 use animations::Animation;
 use models::Config;
+use std::fmt::Debug;
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::RwLock;
+use std::thread;
+use std::time::Duration;
 
-mod models;
 mod animations;
 mod logging;
+mod models;
 
-pub struct PipeContext<Context, V>(Context, V);
+pub struct ChainContext<Context, V> {
+    context: Context,
+    result: V,
+}
 
-impl<Context, Value> PipeContext<Context, Value> where Context: Sized + Copy {
-    pub fn out(self) -> Value {
-        self.1
+impl<Context, Value> ChainContext<Context, Value>
+where
+    Context: Sized + Copy,
+{
+    pub fn result(self) -> Value {
+        self.result
     }
 
-    pub fn map<F, R>(self, f: F) -> PipeContext<Context, R> where F: FnOnce(Value) -> R {
-        PipeContext(self.0, f(self.1))
+    pub fn chain_resultx<F, R>(self, f: F) -> ChainContext<Context, R>
+    where
+        F: FnOnce(Value) -> R,
+    {
+        ChainContext {
+            context: self.context,
+            result: f(self.result),
+        }
     }
 
-    pub fn map_out<F, R>(self, f: F) -> R where F: FnOnce(Value) -> R {
-        f(self.1)
+    pub fn chain_mapx<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Value) -> R,
+    {
+        f(self.result)
     }
 
-    pub fn to<F, R>(self, f: F) -> PipeContext<Context, R> where F: FnOnce(Context, Value) -> R {
-        PipeContext(self.0, f(self.0, self.1))
+    pub fn chain_callx<F, R>(self, f: F) -> ChainContext<Context, R>
+    where
+        F: FnOnce(Context, Value) -> R,
+    {
+        ChainContext {
+            context: self.context,
+            result: f(self.context, self.result),
+        }
     }
 
-    pub fn final_to<F, R>(self, f: F) -> R where F: FnOnce(Context, Value) -> R {
-        f(self.0, self.1)
+    pub fn chain_end<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Context, Value) -> R,
+    {
+        f(self.context, self.result)
     }
 }
 
 trait PipeFactory<T> {
-    fn pipe_in<V>(&self, v: V) -> PipeContext<&Self, V>;
+    fn chain<V>(&self, v: V) -> ChainContext<&Self, V>;
 }
 
 impl<T> PipeFactory<T> for T {
-    fn pipe_in<V>(&self, v: V) -> PipeContext<&Self, V> {
-        PipeContext(self, v)
+    fn chain<V>(&self, v: V) -> ChainContext<&Self, V> {
+        ChainContext {
+            context: self,
+            result: v,
+        }
     }
 }
 
@@ -106,14 +133,10 @@ impl OverlayWindow {
                     xcb::x::Cw::EventMask(xcb::x::EventMask::EXPOSURE),
                     xcb::x::Cw::Colormap(colormap),
                 ],
-            })
+            }),
         );
 
-        conn.send_request(
-            &(xcb::x::FreeColormap {
-                cmap: colormap,
-            })
-        );
+        conn.send_request(&(xcb::x::FreeColormap { cmap: colormap }));
 
         conn.send_request(
             &(xcb::x::ChangeProperty {
@@ -122,7 +145,7 @@ impl OverlayWindow {
                 property: xcb::x::ATOM_WM_NAME,
                 r#type: xcb::x::ATOM_STRING,
                 data: "dgsmousereveal".as_bytes(),
-            })
+            }),
         );
 
         conn.send_request(
@@ -132,7 +155,7 @@ impl OverlayWindow {
                 property: window_state,
                 r#type: xcb::x::ATOM_ATOM,
                 data: &[window_on_top],
-            })
+            }),
         );
 
         // Prevent interaction from the mouse with the window,
@@ -145,15 +168,13 @@ impl OverlayWindow {
                 x_offset: 0,
                 y_offset: 0,
                 ordering: xcb::x::ClipOrdering::Unsorted,
-                rectangles: &[
-                    xcb::x::Rectangle {
-                        x: 0,
-                        y: 0,
-                        width: 0,
-                        height: 0,
-                    },
-                ],
-            })
+                rectangles: &[xcb::x::Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                }],
+            }),
         );
 
         win
@@ -162,7 +183,7 @@ impl OverlayWindow {
     pub fn set_center_position(&mut self, pos: models::Position32) {
         let pos = models::Position32::new(
             pos.x - (self.size as i32) / 2,
-            pos.y - (self.size as i32) / 2
+            pos.y - (self.size as i32) / 2,
         );
 
         if self.position == pos {
@@ -176,7 +197,7 @@ impl OverlayWindow {
                     xcb::x::ConfigWindow::X(pos.x as _),
                     xcb::x::ConfigWindow::Y(pos.y as _),
                 ],
-            })
+            }),
         );
 
         self.position = pos;
@@ -188,20 +209,14 @@ impl OverlayWindow {
 
     fn show(&mut self) {
         self.visible = true;
-        self.conn.send_request(
-            &(xcb::x::MapWindow {
-                window: self.win,
-            })
-        );
+        self.conn
+            .send_request(&(xcb::x::MapWindow { window: self.win }));
     }
 
     fn hide(&mut self) {
         self.visible = false;
-        self.conn.send_request(
-            &(xcb::x::UnmapWindow {
-                window: self.win,
-            })
-        );
+        self.conn
+            .send_request(&(xcb::x::UnmapWindow { window: self.win }));
     }
 
     fn get_gfx(&self) -> xcb::x::Gcontext {
@@ -245,7 +260,7 @@ trait ConnExt {
     fn create_colormap(
         &self,
         screen: &xcb::x::Screen,
-        visual: &xcb::x::Visualtype
+        visual: &xcb::x::Visualtype,
     ) -> xcb::x::Colormap;
     fn create_gcontext(&self, win: xcb::x::Window) -> xcb::x::Gcontext;
     fn get_pointer(&self, win: xcb::x::Window) -> models::Position32;
@@ -256,7 +271,7 @@ impl ConnExt for xcb::Connection {
     fn create_colormap(
         &self,
         screen: &xcb::x::Screen,
-        visual: &xcb::x::Visualtype
+        visual: &xcb::x::Visualtype,
     ) -> xcb::x::Colormap {
         let colormap = self.generate_id();
         self.send_request(
@@ -265,7 +280,7 @@ impl ConnExt for xcb::Connection {
                 mid: colormap,
                 window: screen.root(),
                 visual: visual.visual_id(),
-            })
+            }),
         );
         colormap
     }
@@ -275,22 +290,20 @@ impl ConnExt for xcb::Connection {
         let create_gc = xcb::x::CreateGc {
             cid: gfx_ctx,
             drawable: xcb::x::Drawable::Window(win),
-            value_list: &(
-                [
+            value_list: &([
                     // xcb::x::Gc::GraphicsExposures(false),
-                ]
-            ),
+                ]),
         };
         self.send_request(&create_gc);
         gfx_ctx
     }
 
     fn get_pointer(&self, win: xcb::x::Window) -> models::Position32 {
-        self.pipe_in(&(xcb::x::QueryPointer { window: win }))
-            .to(Self::send_request)
-            .to(Self::wait_for_reply)
-            .map(Result::unwrap)
-            .map_out(|r| models::Position32::new(r.root_x() as i32, r.root_y() as i32))
+        self.chain(&(xcb::x::QueryPointer { window: win }))
+            .chain_callx(Self::send_request)
+            .chain_callx(Self::wait_for_reply)
+            .chain_resultx(Result::unwrap)
+            .chain_mapx(|r| models::Position32::new(r.root_x() as i32, r.root_y() as i32))
     }
 
     fn get_atom(&self, name: &[u8]) -> xcb::x::Atom {
@@ -299,33 +312,40 @@ impl ConnExt for xcb::Connection {
             name,
         };
 
-        self.pipe_in(&atom).to(Self::send_request).final_to(Self::wait_for_reply).unwrap().atom()
+        self.chain(&atom)
+            .chain_callx(Self::send_request)
+            .chain_end(Self::wait_for_reply)
+            .unwrap()
+            .atom()
     }
 }
 
 fn main() -> ! {
-    let last_velocity_event = std::sync::Arc::new(RwLock::new(models::VelocityEvent::new(0.0)));
+    let (tx, rx) = std::sync::mpsc::channel();
 
     let config = models::Config::new();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let last_velocity_event = std::sync::Arc::new(RwLock::new(models::VelocityEvent::new(0.0)));
+
     start_capture_thread(config.clone(), rx);
+
     start_motion_thread(
         config.clone(),
         logging::CaptureEmitter::new(
             std::time::Instant::now(),
             std::time::Duration::from_secs_f64(config.capture_seconds),
-            tx.clone()
+            tx.clone(),
         ),
-        std::sync::Arc::clone(&last_velocity_event)
+        std::sync::Arc::clone(&last_velocity_event),
     );
+
     start_ui_loop(
         config.clone(),
         logging::CaptureEmitter::new(
             std::time::Instant::now(),
             std::time::Duration::from_secs_f64(config.capture_seconds),
-            tx
+            tx,
         ),
-        last_velocity_event
+        last_velocity_event,
     );
 }
 
@@ -351,43 +371,38 @@ fn start_capture_thread(config: Config, receiver: std::sync::mpsc::Receiver<logg
             }
         }
 
-        capture
-            .events()
-            .iter()
-            .for_each(|x| {
-                match x {
-                    logging::LogEvent::PointerInput { x, y, time } => {
-                        println!(
-                            "{:1.6}s PointerInputEvent, x: {}, y: {}",
-                            (*time - start).as_secs_f64(),
-                            x,
-                            y
-                        );
-                    }
-                    logging::LogEvent::Velocity { velocity, time } => {
-                        println!(
-                            "{:1.6}s VelocityEvent, velocity: {:1.1}",
-                            (*time - start).as_secs_f64(),
-                            velocity
-                        );
-                    }
-                    logging::LogEvent::Evdev { time, evdev_event } => {
-                        println!(
-                            "{:1.6}s EvdevEvent, evdev_event: {:?}, value: {}",
-                            (*time - start).as_secs_f64(),
-                            evdev_event.kind(),
-                            evdev_event.value()
-                        );
-                    }
-                }
-            });
+        capture.events().iter().for_each(|x| match x {
+            logging::LogEvent::PointerInput { x, y, time } => {
+                println!(
+                    "{:1.6}s PointerInputEvent, x: {}, y: {}",
+                    (*time - start).as_secs_f64(),
+                    x,
+                    y
+                );
+            }
+            logging::LogEvent::Velocity { velocity, time } => {
+                println!(
+                    "{:1.6}s VelocityEvent, velocity: {:1.1}",
+                    (*time - start).as_secs_f64(),
+                    velocity
+                );
+            }
+            logging::LogEvent::Evdev { time, evdev_event } => {
+                println!(
+                    "{:1.6}s EvdevEvent, evdev_event: {:?}, value: {}",
+                    (*time - start).as_secs_f64(),
+                    evdev_event.kind(),
+                    evdev_event.value()
+                );
+            }
+        });
     });
 }
 
 fn start_ui_loop(
     config: models::Config,
     capture: logging::CaptureEmitter,
-    last_velocity_event: std::sync::Arc<RwLock<models::VelocityEvent>>
+    last_velocity_event: std::sync::Arc<RwLock<models::VelocityEvent>>,
 ) -> ! {
     let (conn, screen_num) = xcb::Connection::connect(None).unwrap();
     let mut win = OverlayWindow::new(config.clone(), conn, screen_num as _);
@@ -407,7 +422,11 @@ fn start_ui_loop(
         win.handle_event();
 
         let velocity_event = *last_velocity_event.read().unwrap();
-        let velocity = if velocity_event.expired() { 0.0 } else { velocity_event.velocity() };
+        let velocity = if velocity_event.expired() {
+            0.0
+        } else {
+            velocity_event.velocity()
+        };
 
         avg_weighted = update_avg(config.clone(), avg_weighted, velocity);
 
@@ -443,7 +462,9 @@ fn start_ui_loop(
 }
 
 fn update_avg(config: models::Config, avg: f64, velocity: f64) -> f64 {
-    let weight_input = (velocity / config.accel).max(config.accel_decay).min(config.accel_inc);
+    let weight_input = (velocity / config.accel)
+        .max(config.accel_decay)
+        .min(config.accel_inc);
     let weight_state = 1.0 - weight_input;
 
     avg * weight_state * config.decay + velocity * weight_input
@@ -452,18 +473,17 @@ fn update_avg(config: models::Config, avg: f64, velocity: f64) -> f64 {
 fn start_motion_thread(
     config: models::Config,
     capture: logging::CaptureEmitter,
-    last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>
+    last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>,
 ) {
-    std::thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_secs(1));
+    std::thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(1));
 
-            MotionMonitor::new(
-                config.device_name.clone(),
-                capture.clone(),
-                std::sync::Arc::clone(&last_speed)
-            ).start_until_error();
-        }
+        MotionMonitor::new(
+            config.device_name.clone(),
+            capture.clone(),
+            std::sync::Arc::clone(&last_speed),
+        )
+        .start_until_error();
     });
 }
 
@@ -492,7 +512,7 @@ impl MotionMonitor {
     pub fn new(
         device_name: String,
         capture: logging::CaptureEmitter,
-        last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>
+        last_speed: std::sync::Arc<RwLock<models::VelocityEvent>>,
     ) -> MotionMonitor {
         MotionMonitor {
             device_name,
@@ -513,10 +533,12 @@ impl MotionMonitor {
     }
 
     fn get_device(&self) -> Option<evdev::Device> {
-        evdev
-            ::enumerate()
+        evdev::enumerate()
             .find(|(_, device)| {
-                device.name().unwrap_or_default().contains(self.device_name.as_str())
+                device
+                    .name()
+                    .unwrap_or_default()
+                    .contains(self.device_name.as_str())
             })
             .map(|(_, device)| device)
     }
@@ -541,7 +563,10 @@ impl MotionMonitor {
     }
 
     fn listen_event_loop(&mut self, mut device: evdev::Device) -> Result<(), evdev::Error> {
-        println!("Starts monitoring device: {}", device.name().unwrap_or("(unknown)"));
+        println!(
+            "Starts monitoring device: {}",
+            device.name().unwrap_or("(unknown)")
+        );
 
         let mut last_debug = std::time::Instant::now();
         loop {
@@ -560,7 +585,11 @@ impl MotionMonitor {
             time: std::time::Instant::now(),
             evdev_event: input_event,
         });
-        match (input_event.event_type(), input_event.kind(), input_event.value()) {
+        match (
+            input_event.event_type(),
+            input_event.kind(),
+            input_event.value(),
+        ) {
             (
                 evdev::EventType::ABSOLUTE,
                 evdev::InputEventKind::AbsAxis(evdev::AbsoluteAxisType::ABS_MT_SLOT),

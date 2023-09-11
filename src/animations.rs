@@ -10,22 +10,19 @@ impl Animation {
             .map(|s| {
                 circle(
                     max_size,
-                    (((max_size - max_border) as f64) * ((s as f64) / 100.0)) as u32
+                    (((max_size - max_border) as f64) * ((s as f64) / 100.0)) as u32,
                 )
             })
             .collect::<Vec<xcb::x::Arc>>();
 
-        Animation {
-            max_border,
-            frames,
-        }
+        Animation { max_border, frames }
     }
     pub fn play(
         &self,
         conn: &xcb::Connection,
         win: xcb::x::Window,
         gfx_ctx: xcb::x::Gcontext,
-        speed: f64
+        speed: f64,
     ) {
         let alpha = ((speed / 5.0).max(0.0).min(200.0) as u32) << 24;
         let red = ((speed / 0.8).max(0.0).min(255.0) as u32) << 16;
@@ -40,20 +37,20 @@ impl Animation {
                 y: 0,
                 width: 500,
                 height: 500,
-            })
+            }),
         );
         conn.send_request(
             &(xcb::x::ChangeGc {
                 gc: gfx_ctx,
                 value_list: &[color, border],
-            })
+            }),
         );
         conn.send_request(
             &(xcb::x::PolyArc {
                 drawable: xcb::x::Drawable::Window(win),
                 gc: gfx_ctx,
                 arcs: &[*self.frames.get(frame_idx).unwrap()],
-            })
+            }),
         );
     }
 }
