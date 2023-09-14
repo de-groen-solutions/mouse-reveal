@@ -1,4 +1,4 @@
-use std::fmt::{ Formatter, Debug };
+use std::fmt::{Debug, Formatter};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -47,7 +47,9 @@ pub struct VelocityEvent {
 
 impl Debug for VelocityEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VelocityEvent").field("velocity", &self.velocity.round()).finish()
+        f.debug_struct("VelocityEvent")
+            .field("velocity", &self.velocity.round())
+            .finish()
     }
 }
 
@@ -81,7 +83,10 @@ pub struct PointerInputEvent {
 
 impl Debug for PointerInputEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PointerInputEvent").field("x", &self.x).field("y", &self.y).finish()
+        f.debug_struct("PointerInputEvent")
+            .field("x", &self.x)
+            .field("y", &self.y)
+            .finish()
     }
 }
 

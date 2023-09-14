@@ -1,4 +1,5 @@
 use animations::Animation;
+use fn_chain_rs::prelude::*;
 use models::Config;
 use std::fmt::Debug;
 use std::sync::mpsc::RecvTimeoutError;
@@ -9,67 +10,6 @@ use std::time::Duration;
 mod animations;
 mod logging;
 mod models;
-
-pub struct ChainContext<Context, V> {
-    context: Context,
-    result: V,
-}
-
-impl<Context, Value> ChainContext<Context, Value>
-where
-    Context: Sized + Copy,
-{
-    pub fn result(self) -> Value {
-        self.result
-    }
-
-    pub fn chain_resultx<F, R>(self, f: F) -> ChainContext<Context, R>
-    where
-        F: FnOnce(Value) -> R,
-    {
-        ChainContext {
-            context: self.context,
-            result: f(self.result),
-        }
-    }
-
-    pub fn chain_mapx<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Value) -> R,
-    {
-        f(self.result)
-    }
-
-    pub fn chain_callx<F, R>(self, f: F) -> ChainContext<Context, R>
-    where
-        F: FnOnce(Context, Value) -> R,
-    {
-        ChainContext {
-            context: self.context,
-            result: f(self.context, self.result),
-        }
-    }
-
-    pub fn chain_end<F, R>(self, f: F) -> R
-    where
-        F: FnOnce(Context, Value) -> R,
-    {
-        f(self.context, self.result)
-    }
-}
-
-trait PipeFactory<T> {
-    fn chain<V>(&self, v: V) -> ChainContext<&Self, V>;
-}
-
-impl<T> PipeFactory<T> for T {
-    fn chain<V>(&self, v: V) -> ChainContext<&Self, V> {
-        ChainContext {
-            context: self,
-            result: v,
-        }
-    }
-}
 
 struct OverlayWindow {
     conn: xcb::Connection,
@@ -299,11 +239,11 @@ impl ConnExt for xcb::Connection {
     }
 
     fn get_pointer(&self, win: xcb::x::Window) -> models::Position32 {
-        self.chain(&(xcb::x::QueryPointer { window: win }))
-            .chain_callx(Self::send_request)
-            .chain_callx(Self::wait_for_reply)
-            .chain_resultx(Result::unwrap)
-            .chain_mapx(|r| models::Position32::new(r.root_x() as i32, r.root_y() as i32))
+        self.chain_with(&(xcb::x::QueryPointer { window: win }))
+            .then(Self::send_request)
+            .then(Self::wait_for_reply)
+            .then_value(Result::unwrap)
+            .map_value(|r| models::Position32::new(r.root_x() as i32, r.root_y() as i32))
     }
 
     fn get_atom(&self, name: &[u8]) -> xcb::x::Atom {
@@ -312,9 +252,9 @@ impl ConnExt for xcb::Connection {
             name,
         };
 
-        self.chain(&atom)
-            .chain_callx(Self::send_request)
-            .chain_end(Self::wait_for_reply)
+        self.chain_with(&atom)
+            .then(Self::send_request)
+            .map(Self::wait_for_reply)
             .unwrap()
             .atom()
     }
@@ -401,7 +341,7 @@ fn start_capture_thread(config: Config, receiver: std::sync::mpsc::Receiver<logg
 
 fn start_ui_loop(
     config: models::Config,
-    capture: logging::CaptureEmitter,
+    _capture: logging::CaptureEmitter,
     last_velocity_event: std::sync::Arc<RwLock<models::VelocityEvent>>,
 ) -> ! {
     let (conn, screen_num) = xcb::Connection::connect(None).unwrap();

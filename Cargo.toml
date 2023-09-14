@@ -7,6 +7,7 @@ icon = "icon.png"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-xcb = { version = "1.2.2", features = ["shape","xinput"] }
+xcb = { version = "1.2.2", features = ["shape", "xinput"] }
 serde = { version = "1.0.183", features = ["derive"] }
 evdev = "0.12.1"
+fn-chain-rs = { name = "fn-chain-rs", path = "../fn-chain-rs" }
